@@ -88,6 +88,8 @@ router.delete('/sessions/:sessionId', async (req, res) => {
 
 router.get('/mcp/cli/list', async (req, res) => {
   try {
+    res.json({ success: true, output: "short-circuit", servers: {} });
+    return;
     const proc = spawn('codex', ['mcp', 'list'], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let stdout = '';

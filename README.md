@@ -299,19 +299,31 @@ We welcome contributions! Please follow these guidelines:
 
 #### Development Process
 1. **Make your changes** following the existing code style
-2. **Test thoroughly** - ensure all features work correctly
-3. **Run quality checks**: `npm run lint && npm run format`
-4. **Commit** with descriptive messages following [Conventional Commits](https://conventionalcommits.org/)
-5. **Push** to your branch: `git push origin feature/amazing-feature`
-6. **Submit** a Pull Request with:
+2. **Run tests**: `npm run test:run` - ensure all tests pass
+3. **Test thoroughly** - ensure all features work correctly
+4. **Run quality checks**: `npm run lint && npm run format`
+5. **Commit** with descriptive messages following [Conventional Commits](https://conventionalcommits.org/)
+6. **Push** to your branch: `git push origin feature/amazing-feature`
+7. **Submit** a Pull Request with:
    - Clear description of changes
    - Screenshots for UI changes
    - Test results if applicable
+
+#### Testing
+We have a comprehensive test suite using Vitest and Testing Library. See [TESTING.md](./TESTING.md) for details.
+
+```bash
+npm test           # Run tests in watch mode
+npm run test:run   # Run all tests once
+npm run test:ui    # Open test UI
+npm run test:coverage  # Generate coverage report
+```
 
 #### What to Contribute
 - **Bug fixes** - Help us improve stability
 - **New features** - Enhance functionality (discuss in issues first)
 - **Documentation** - Improve guides and API docs
+- **Tests** - Improve test coverage and quality
 - **UI/UX improvements** - Better user experience
 - **Performance optimizations** - Make it faster
 
