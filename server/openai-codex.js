@@ -272,7 +272,8 @@ export async function queryCodex(command, options = {}, ws) {
           data: {
             used: totalTokens,
             total: 200000 // Default context window for Codex models
-          }
+          },
+          sessionId: currentSessionId
         });
       }
     }
@@ -280,7 +281,8 @@ export async function queryCodex(command, options = {}, ws) {
     // Send completion event
     sendMessage(ws, {
       type: 'codex-complete',
-      sessionId: currentSessionId
+      sessionId: currentSessionId,
+      actualSessionId: thread.id
     });
 
   } catch (error) {
