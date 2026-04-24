@@ -21,6 +21,12 @@ export const authenticatedFetch = (url, options = {}) => {
       ...defaultHeaders,
       ...options.headers,
     },
+  }).then((response) => {
+    const refreshedToken = response.headers.get('X-Refreshed-Token');
+    if (refreshedToken) {
+      localStorage.setItem('auth-token', refreshedToken);
+    }
+    return response;
   });
 };
 
@@ -46,26 +52,20 @@ export const api = {
   // Protected endpoints
   // config endpoint removed - no longer needed (frontend uses window.location)
   projects: () => authenticatedFetch('/api/projects'),
-  sessions: (projectName, limit = 5, offset = 0) => 
+  sessions: (projectName, limit = 5, offset = 0) =>
     authenticatedFetch(`/api/projects/${projectName}/sessions?limit=${limit}&offset=${offset}`),
-  sessionMessages: (projectName, sessionId, limit = null, offset = 0, provider = 'claude') => {
+  // Unified endpoint — all providers through one URL
+  unifiedSessionMessages: (sessionId, provider = 'claude', { projectName = '', projectPath = '', limit = null, offset = 0 } = {}) => {
     const params = new URLSearchParams();
+    params.append('provider', provider);
+    if (projectName) params.append('projectName', projectName);
+    if (projectPath) params.append('projectPath', projectPath);
     if (limit !== null) {
-      params.append('limit', limit);
-      params.append('offset', offset);
+      params.append('limit', String(limit));
+      params.append('offset', String(offset));
     }
     const queryString = params.toString();
-
-    // Route to the correct endpoint based on provider
-    let url;
-    if (provider === 'codex') {
-      url = `/api/codex/sessions/${sessionId}/messages${queryString ? `?${queryString}` : ''}`;
-    } else if (provider === 'cursor') {
-      url = `/api/cursor/sessions/${sessionId}/messages${queryString ? `?${queryString}` : ''}`;
-    } else {
-      url = `/api/projects/${projectName}/sessions/${sessionId}/messages${queryString ? `?${queryString}` : ''}`;
-    }
-    return authenticatedFetch(url);
+    return authenticatedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages${queryString ? `?${queryString}` : ''}`);
   },
   renameProject: (projectName, displayName) =>
     authenticatedFetch(`/api/projects/${projectName}/rename`, {
@@ -76,19 +76,34 @@ export const api = {
     authenticatedFetch(`/api/projects/${projectName}/sessions/${sessionId}`, {
       method: 'DELETE',
     }),
+  renameSession: (sessionId, summary, provider) =>
+    authenticatedFetch(`/api/sessions/${sessionId}/rename`, {
+      method: 'PUT',
+      body: JSON.stringify({ summary, provider }),
+    }),
   deleteCodexSession: (sessionId) =>
     authenticatedFetch(`/api/codex/sessions/${sessionId}`, {
       method: 'DELETE',
     }),
-  deleteProject: (projectName, force = false) =>
-    authenticatedFetch(`/api/projects/${projectName}${force ? '?force=true' : ''}`, {
+  deleteGeminiSession: (sessionId) =>
+    authenticatedFetch(`/api/gemini/sessions/${sessionId}`, {
       method: 'DELETE',
     }),
-  createProject: (path) =>
-    authenticatedFetch('/api/projects/create', {
-      method: 'POST',
-      body: JSON.stringify({ path }),
-    }),
+  deleteProject: (projectName, force = false, deleteData = false) => {
+    const params = new URLSearchParams();
+    if (force) params.set('force', 'true');
+    if (deleteData) params.set('deleteData', 'true');
+    const qs = params.toString();
+    return authenticatedFetch(`/api/projects/${projectName}${qs ? `?${qs}` : ''}`, {
+      method: 'DELETE',
+    });
+  },
+  searchConversationsUrl: (query, limit = 50) => {
+    const token = localStorage.getItem('auth-token');
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    if (token) params.set('token', token);
+    return `/api/search/conversations?${params.toString()}`;
+  },
   createWorkspace: (workspaceData) =>
     authenticatedFetch('/api/projects/create-workspace', {
       method: 'POST',
@@ -96,6 +111,8 @@ export const api = {
     }),
   readFile: (projectName, filePath) =>
     authenticatedFetch(`/api/projects/${projectName}/file?filePath=${encodeURIComponent(filePath)}`),
+  readFileBlob: (projectName, filePath) =>
+    authenticatedFetch(`/api/projects/${projectName}/files/content?path=${encodeURIComponent(filePath)}`),
   saveFile: (projectName, filePath, content) =>
     authenticatedFetch(`/api/projects/${projectName}/file`, {
       method: 'PUT',
@@ -103,8 +120,28 @@ export const api = {
     }),
   getFiles: (projectName, options = {}) =>
     authenticatedFetch(`/api/projects/${projectName}/files`, options),
-  transcribe: (formData) =>
-    authenticatedFetch('/api/transcribe', {
+
+  // File operations
+  createFile: (projectName, { path, type, name }) =>
+    authenticatedFetch(`/api/projects/${projectName}/files/create`, {
+      method: 'POST',
+      body: JSON.stringify({ path, type, name }),
+    }),
+
+  renameFile: (projectName, { oldPath, newName }) =>
+    authenticatedFetch(`/api/projects/${projectName}/files/rename`, {
+      method: 'PUT',
+      body: JSON.stringify({ oldPath, newName }),
+    }),
+
+  deleteFile: (projectName, { path, type }) =>
+    authenticatedFetch(`/api/projects/${projectName}/files`, {
+      method: 'DELETE',
+      body: JSON.stringify({ path, type }),
+    }),
+
+  uploadFiles: (projectName, formData) =>
+    authenticatedFetch(`/api/projects/${projectName}/files/upload`, {
       method: 'POST',
       body: formData,
       headers: {}, // Let browser set Content-Type for FormData
@@ -113,18 +150,18 @@ export const api = {
   // TaskMaster endpoints
   taskmaster: {
     // Initialize TaskMaster in a project
-    init: (projectName) => 
+    init: (projectName) =>
       authenticatedFetch(`/api/taskmaster/init/${projectName}`, {
         method: 'POST',
       }),
-    
+
     // Add a new task
     addTask: (projectName, { prompt, title, description, priority, dependencies }) =>
       authenticatedFetch(`/api/taskmaster/add-task/${projectName}`, {
         method: 'POST',
         body: JSON.stringify({ prompt, title, description, priority, dependencies }),
       }),
-    
+
     // Parse PRD to generate tasks
     parsePRD: (projectName, { fileName, numTasks, append }) =>
       authenticatedFetch(`/api/taskmaster/parse-prd/${projectName}`, {
@@ -150,7 +187,7 @@ export const api = {
         body: JSON.stringify(updates),
       }),
   },
-  
+
   // Browse filesystem for project suggestions
   browseFilesystem: (dirPath = null) => {
     const params = new URLSearchParams();
@@ -182,4 +219,22 @@ export const api = {
 
   // Generic GET method for any endpoint
   get: (endpoint) => authenticatedFetch(`/api${endpoint}`),
+
+  // Generic POST method for any endpoint
+  post: (endpoint, body) => authenticatedFetch(`/api${endpoint}`, {
+    method: 'POST',
+    ...(body instanceof FormData ? { body } : { body: JSON.stringify(body) }),
+  }),
+
+  // Generic PUT method for any endpoint
+  put: (endpoint, body) => authenticatedFetch(`/api${endpoint}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  }),
+
+  // Generic DELETE method for any endpoint
+  delete: (endpoint, options = {}) => authenticatedFetch(`/api${endpoint}`, {
+    method: 'DELETE',
+    ...options,
+  }),
 };

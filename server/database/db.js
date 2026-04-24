@@ -2,11 +2,21 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { findAppRoot, getModuleDir } from '../utils/runtime-paths.js';
+import {
+  APP_CONFIG_TABLE_SQL,
+  USER_NOTIFICATION_PREFERENCES_TABLE_SQL,
+  VAPID_KEYS_TABLE_SQL,
+  PUSH_SUBSCRIPTIONS_TABLE_SQL,
+  SESSION_NAMES_TABLE_SQL,
+  SESSION_NAMES_LOOKUP_INDEX_SQL,
+  DATABASE_SCHEMA_SQL
+} from './schema.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname = getModuleDir(import.meta.url);
+// The compiled backend lives under dist-server/server/database, but the install root we log
+// should still point at the project/app root. Resolving it here avoids build-layout drift.
+const APP_ROOT = findAppRoot(__dirname);
 
 // ANSI color codes for terminal output
 const colors = {
@@ -24,7 +34,6 @@ const c = {
 
 // Use DATABASE_PATH environment variable if set, otherwise use default location
 const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, 'auth.db');
-const INIT_SQL_PATH = path.join(__dirname, 'init.sql');
 
 // Ensure database directory exists if custom path is provided
 if (process.env.DATABASE_PATH) {
@@ -40,11 +49,32 @@ if (process.env.DATABASE_PATH) {
   }
 }
 
+// As part of 1.19.2 we are introducing a new location for auth.db. The below handles exisitng moving legacy database from install directory to new location
+const LEGACY_DB_PATH = path.join(__dirname, 'auth.db');
+if (DB_PATH !== LEGACY_DB_PATH && !fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
+  try {
+    fs.copyFileSync(LEGACY_DB_PATH, DB_PATH);
+    console.log(`[MIGRATION] Copied database from ${LEGACY_DB_PATH} to ${DB_PATH}`);
+    for (const suffix of ['-wal', '-shm']) {
+      if (fs.existsSync(LEGACY_DB_PATH + suffix)) {
+        fs.copyFileSync(LEGACY_DB_PATH + suffix, DB_PATH + suffix);
+      }
+    }
+  } catch (err) {
+    console.warn(`[MIGRATION] Could not copy legacy database: ${err.message}`);
+  }
+}
+
 // Create database connection
 const db = new Database(DB_PATH);
 
+// app_config must exist before any other module imports (auth.js reads the JWT secret at load time).
+// runMigrations() also creates this table, but it runs too late for existing installations
+// where auth.js is imported before initializeDatabase() is called.
+db.exec(APP_CONFIG_TABLE_SQL);
+
 // Show app installation path prominently
-const appInstallPath = path.join(__dirname, '../..');
+const appInstallPath = APP_ROOT;
 console.log('');
 console.log(c.dim('═'.repeat(60)));
 console.log(`${c.info('[INFO]')} App Installation: ${c.bright(appInstallPath)}`);
@@ -75,6 +105,13 @@ const runMigrations = () => {
       db.exec('ALTER TABLE users ADD COLUMN has_completed_onboarding BOOLEAN DEFAULT 0');
     }
 
+    db.exec(USER_NOTIFICATION_PREFERENCES_TABLE_SQL);
+    db.exec(VAPID_KEYS_TABLE_SQL);
+    db.exec(PUSH_SUBSCRIPTIONS_TABLE_SQL);
+    db.exec(APP_CONFIG_TABLE_SQL);
+    db.exec(SESSION_NAMES_TABLE_SQL);
+    db.exec(SESSION_NAMES_LOOKUP_INDEX_SQL);
+
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error.message);
@@ -85,8 +122,7 @@ const runMigrations = () => {
 // Initialize database with schema
 const initializeDatabase = async () => {
   try {
-    const initSQL = fs.readFileSync(INIT_SQL_PATH, 'utf8');
-    db.exec(initSQL);
+    db.exec(DATABASE_SCHEMA_SQL);
     console.log('Database initialized successfully');
     runMigrations();
   } catch (error) {
@@ -128,12 +164,12 @@ const userDb = {
     }
   },
 
-  // Update last login time
+  // Update last login time (non-fatal — logged but not thrown)
   updateLastLogin: (userId) => {
     try {
       db.prepare('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?').run(userId);
     } catch (err) {
-      throw err;
+      console.warn('Failed to update last login:', err.message);
     }
   },
 
@@ -332,6 +368,197 @@ const credentialsDb = {
   }
 };
 
+const DEFAULT_NOTIFICATION_PREFERENCES = {
+  channels: {
+    inApp: false,
+    webPush: false
+  },
+  events: {
+    actionRequired: true,
+    stop: true,
+    error: true
+  }
+};
+
+const normalizeNotificationPreferences = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+
+  return {
+    channels: {
+      inApp: source.channels?.inApp === true,
+      webPush: source.channels?.webPush === true
+    },
+    events: {
+      actionRequired: source.events?.actionRequired !== false,
+      stop: source.events?.stop !== false,
+      error: source.events?.error !== false
+    }
+  };
+};
+
+const notificationPreferencesDb = {
+  getPreferences: (userId) => {
+    try {
+      const row = db.prepare('SELECT preferences_json FROM user_notification_preferences WHERE user_id = ?').get(userId);
+      if (!row) {
+        const defaults = normalizeNotificationPreferences(DEFAULT_NOTIFICATION_PREFERENCES);
+        db.prepare(
+          'INSERT INTO user_notification_preferences (user_id, preferences_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
+        ).run(userId, JSON.stringify(defaults));
+        return defaults;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(row.preferences_json);
+      } catch {
+        parsed = DEFAULT_NOTIFICATION_PREFERENCES;
+      }
+      return normalizeNotificationPreferences(parsed);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  updatePreferences: (userId, preferences) => {
+    try {
+      const normalized = normalizeNotificationPreferences(preferences);
+      db.prepare(
+        `INSERT INTO user_notification_preferences (user_id, preferences_json, updated_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id) DO UPDATE SET
+           preferences_json = excluded.preferences_json,
+           updated_at = CURRENT_TIMESTAMP`
+      ).run(userId, JSON.stringify(normalized));
+      return normalized;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+const pushSubscriptionsDb = {
+  saveSubscription: (userId, endpoint, keysP256dh, keysAuth) => {
+    try {
+      db.prepare(
+        `INSERT INTO push_subscriptions (user_id, endpoint, keys_p256dh, keys_auth)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           user_id = excluded.user_id,
+           keys_p256dh = excluded.keys_p256dh,
+           keys_auth = excluded.keys_auth`
+      ).run(userId, endpoint, keysP256dh, keysAuth);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  getSubscriptions: (userId) => {
+    try {
+      return db.prepare('SELECT endpoint, keys_p256dh, keys_auth FROM push_subscriptions WHERE user_id = ?').all(userId);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  removeSubscription: (endpoint) => {
+    try {
+      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  removeAllForUser: (userId) => {
+    try {
+      db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').run(userId);
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// Session custom names database operations
+const sessionNamesDb = {
+  // Set (insert or update) a custom session name
+  setName: (sessionId, provider, customName) => {
+    db.prepare(`
+      INSERT INTO session_names (session_id, provider, custom_name)
+      VALUES (?, ?, ?)
+      ON CONFLICT(session_id, provider)
+      DO UPDATE SET custom_name = excluded.custom_name, updated_at = CURRENT_TIMESTAMP
+    `).run(sessionId, provider, customName);
+  },
+
+  // Get a single custom session name
+  getName: (sessionId, provider) => {
+    const row = db.prepare(
+      'SELECT custom_name FROM session_names WHERE session_id = ? AND provider = ?'
+    ).get(sessionId, provider);
+    return row?.custom_name || null;
+  },
+
+  // Batch lookup — returns Map<sessionId, customName>
+  getNames: (sessionIds, provider) => {
+    if (!sessionIds.length) return new Map();
+    const placeholders = sessionIds.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT session_id, custom_name FROM session_names
+       WHERE session_id IN (${placeholders}) AND provider = ?`
+    ).all(...sessionIds, provider);
+    return new Map(rows.map(r => [r.session_id, r.custom_name]));
+  },
+
+  // Delete a custom session name
+  deleteName: (sessionId, provider) => {
+    return db.prepare(
+      'DELETE FROM session_names WHERE session_id = ? AND provider = ?'
+    ).run(sessionId, provider).changes > 0;
+  },
+};
+
+// Apply custom session names from the database (overrides CLI-generated summaries)
+function applyCustomSessionNames(sessions, provider) {
+  if (!sessions?.length) return;
+  try {
+    const ids = sessions.map(s => s.id);
+    const customNames = sessionNamesDb.getNames(ids, provider);
+    for (const session of sessions) {
+      const custom = customNames.get(session.id);
+      if (custom) session.summary = custom;
+    }
+  } catch (error) {
+    console.warn(`[DB] Failed to apply custom session names for ${provider}:`, error.message);
+  }
+}
+
+// App config database operations
+const appConfigDb = {
+  get: (key) => {
+    try {
+      const row = db.prepare('SELECT value FROM app_config WHERE key = ?').get(key);
+      return row?.value || null;
+    } catch (err) {
+      return null;
+    }
+  },
+
+  set: (key, value) => {
+    db.prepare(
+      'INSERT INTO app_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    ).run(key, value);
+  },
+
+  getOrCreateJwtSecret: () => {
+    let secret = appConfigDb.get('jwt_secret');
+    if (!secret) {
+      secret = crypto.randomBytes(64).toString('hex');
+      appConfigDb.set('jwt_secret', secret);
+    }
+    return secret;
+  }
+};
+
 // Backward compatibility - keep old names pointing to new system
 const githubTokensDb = {
   createGithubToken: (userId, tokenName, githubToken, description = null) => {
@@ -357,5 +584,10 @@ export {
   userDb,
   apiKeysDb,
   credentialsDb,
+  notificationPreferencesDb,
+  pushSubscriptionsDb,
+  sessionNamesDb,
+  applyCustomSessionNames,
+  appConfigDb,
   githubTokensDb // Backward compatibility
 };

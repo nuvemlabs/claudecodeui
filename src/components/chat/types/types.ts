@@ -1,6 +1,6 @@
-import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
+import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 
-export type Provider = SessionProvider;
+export type Provider = LLMProvider;
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 
@@ -15,6 +15,14 @@ export interface ToolResult {
   timestamp?: string | number | Date;
   toolUseResult?: unknown;
   [key: string]: unknown;
+}
+
+export interface SubagentChildTool {
+  toolId: string;
+  toolName: string;
+  toolInput: unknown;
+  toolResult?: ToolResult | null;
+  timestamp: Date;
 }
 
 export interface ChatMessage {
@@ -32,6 +40,12 @@ export interface ChatMessage {
   toolResult?: ToolResult | null;
   toolId?: string;
   toolCallId?: string;
+  isSubagentContainer?: boolean;
+  subagentState?: {
+    childTools: SubagentChildTool[];
+    currentToolIndex: number;
+    isComplete: boolean;
+  };
   [key: string]: unknown;
 }
 

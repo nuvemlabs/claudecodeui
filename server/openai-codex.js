@@ -14,6 +14,10 @@
  */
 
 import { Codex } from '@openai/codex-sdk';
+import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
+import { sessionsService } from './modules/providers/services/sessions.service.js';
+import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
+import { createNormalizedMessage } from './shared/utils.js';
 
 // Track active sessions
 const activeCodexSessions = new Map();
@@ -191,6 +195,7 @@ function mapPermissionModeToCodexOptions(permissionMode) {
 export async function queryCodex(command, options = {}, ws) {
   const {
     sessionId,
+    sessionSummary,
     cwd,
     projectPath,
     model,
@@ -203,6 +208,7 @@ export async function queryCodex(command, options = {}, ws) {
   let codex;
   let thread;
   let currentSessionId = sessionId;
+  let terminalFailure = null;
   const abortController = new AbortController();
 
   try {
@@ -238,11 +244,7 @@ export async function queryCodex(command, options = {}, ws) {
     });
 
     // Send session created event
-    sendMessage(ws, {
-      type: 'session-created',
-      sessionId: currentSessionId,
-      provider: 'codex'
-    });
+    sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: currentSessionId, sessionId: currentSessionId, provider: 'codex' }));
 
     // Execute with streaming
     const streamedTurn = await thread.runStreamed(command, {
@@ -262,32 +264,41 @@ export async function queryCodex(command, options = {}, ws) {
 
       const transformed = transformCodexEvent(event);
 
-      sendMessage(ws, {
-        type: 'codex-response',
-        data: transformed,
-        sessionId: currentSessionId
-      });
+      // Normalize the transformed event into NormalizedMessage(s) via adapter
+      const normalizedMsgs = sessionsService.normalizeMessage('codex', transformed, currentSessionId);
+      for (const msg of normalizedMsgs) {
+        sendMessage(ws, msg);
+      }
+
+      if (event.type === 'turn.failed' && !terminalFailure) {
+        terminalFailure = event.error || new Error('Turn failed');
+        notifyRunFailed({
+          userId: ws?.userId || null,
+          provider: 'codex',
+          sessionId: currentSessionId,
+          sessionName: sessionSummary,
+          error: terminalFailure
+        });
+      }
 
       // Extract and send token usage if available (normalized to match Claude format)
       if (event.type === 'turn.completed' && event.usage) {
         const totalTokens = (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0);
-        sendMessage(ws, {
-          type: 'token-budget',
-          data: {
-            used: totalTokens,
-            total: 200000 // Default context window for Codex models
-          },
-          sessionId: currentSessionId
-        });
+        sendMessage(ws, createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget: { used: totalTokens, total: 200000 }, sessionId: currentSessionId, provider: 'codex' }));
       }
     }
 
     // Send completion event
-    sendMessage(ws, {
-      type: 'codex-complete',
-      sessionId: currentSessionId,
-      actualSessionId: thread.id
-    });
+    if (!terminalFailure) {
+      sendMessage(ws, createNormalizedMessage({ kind: 'complete', actualSessionId: thread.id, sessionId: currentSessionId, provider: 'codex' }));
+      notifyRunStopped({
+        userId: ws?.userId || null,
+        provider: 'codex',
+        sessionId: currentSessionId,
+        sessionName: sessionSummary,
+        stopReason: 'completed'
+      });
+    }
 
   } catch (error) {
     const session = currentSessionId ? activeCodexSessions.get(currentSessionId) : null;
@@ -298,11 +309,23 @@ export async function queryCodex(command, options = {}, ws) {
 
     if (!wasAborted) {
       console.error('[Codex] Error:', error);
-      sendMessage(ws, {
-        type: 'codex-error',
-        error: error.message,
-        sessionId: currentSessionId
-      });
+
+      // Check if Codex SDK is available for a clearer error message
+      const installed = await providerAuthService.isProviderInstalled('codex');
+      const errorContent = !installed
+        ? 'Codex CLI is not configured. Please set up authentication first.'
+        : error.message;
+
+      sendMessage(ws, createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: currentSessionId, provider: 'codex' }));
+      if (!terminalFailure) {
+        notifyRunFailed({
+          userId: ws?.userId || null,
+          provider: 'codex',
+          sessionId: currentSessionId,
+          sessionName: sessionSummary,
+          error
+        });
+      }
     }
 
   } finally {

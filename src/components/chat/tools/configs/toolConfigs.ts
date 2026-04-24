@@ -5,7 +5,7 @@
 
 export interface ToolDisplayConfig {
   input: {
-    type: 'one-line' | 'collapsible' | 'hidden';
+    type: 'one-line' | 'collapsible' | 'plan' | 'hidden';
     // One-line config
     icon?: string;
     label?: string;
@@ -31,7 +31,7 @@ export interface ToolDisplayConfig {
   result?: {
     hidden?: boolean;
     hideOnSuccess?: boolean;
-    type?: 'one-line' | 'collapsible' | 'special';
+    type?: 'one-line' | 'collapsible' | 'plan' | 'special';
     title?: string | ((result: any) => string);
     defaultOpen?: boolean;
     // Special result handlers
@@ -274,6 +274,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
           }
           return { todos, isResult: true };
         } catch (e) {
+          console.warn('Failed to parse todo list content:', e);
           return { todos: [], isResult: true };
         }
       }
@@ -383,7 +384,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
         const description = input.description || 'Running task';
         return `Subagent / ${subagentType}: ${description}`;
       },
-      defaultOpen: true,
+      defaultOpen: false,
       contentType: 'markdown',
       getContentProps: (input) => {
         // If only prompt exists (and required fields), show just the prompt
@@ -424,14 +425,8 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
     },
     result: {
       type: 'collapsible',
-      title: (result) => {
-        // Check if result has content with type array (agent results often have this structure)
-        if (result && result.content && Array.isArray(result.content)) {
-          return 'Subagent Response';
-        }
-        return 'Subagent Result';
-      },
-      defaultOpen: true,
+      title: 'Subagent result',
+      defaultOpen: false,
       contentType: 'markdown',
       getContentProps: (result) => {
         // Handle agent results which may have complex structure
@@ -499,7 +494,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
 
   exit_plan_mode: {
     input: {
-      type: 'collapsible',
+      type: 'plan',
       title: 'Implementation plan',
       defaultOpen: true,
       contentType: 'markdown',
@@ -508,28 +503,14 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       })
     },
     result: {
-      type: 'collapsible',
-      contentType: 'markdown',
-      getContentProps: (result) => {
-        try {
-          let parsed = result.content;
-          if (typeof parsed === 'string') {
-            parsed = JSON.parse(parsed);
-          }
-          return {
-            content: parsed.plan?.replace(/\\n/g, '\n') || parsed.plan
-          };
-        } catch (e) {
-          return { content: '' };
-        }
-      }
+      hidden: true
     }
   },
 
   // Also register as ExitPlanMode (the actual tool name used by Claude)
   ExitPlanMode: {
     input: {
-      type: 'collapsible',
+      type: 'plan',
       title: 'Implementation plan',
       defaultOpen: true,
       contentType: 'markdown',
@@ -538,21 +519,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
       })
     },
     result: {
-      type: 'collapsible',
-      contentType: 'markdown',
-      getContentProps: (result) => {
-        try {
-          let parsed = result.content;
-          if (typeof parsed === 'string') {
-            parsed = JSON.parse(parsed);
-          }
-          return {
-            content: parsed.plan?.replace(/\\n/g, '\n') || parsed.plan
-          };
-        } catch (e) {
-          return { content: '' };
-        }
-      }
+      hidden: true
     }
   },
 

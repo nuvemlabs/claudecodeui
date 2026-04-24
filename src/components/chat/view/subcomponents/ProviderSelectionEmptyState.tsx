@@ -1,16 +1,36 @@
-import React from 'react';
-import { Check, ChevronDown } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
-import SessionProviderLogo from '../../../SessionProviderLogo';
-import NextTaskBanner from '../../../NextTaskBanner.jsx';
-import { CLAUDE_MODELS, CURSOR_MODELS, CODEX_MODELS } from '../../../../../shared/modelConstants';
-import type { ProjectSession, SessionProvider } from '../../../../types/app';
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronDown } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
-interface ProviderSelectionEmptyStateProps {
+import { useServerPlatform } from "../../../../hooks/useServerPlatform";
+import SessionProviderLogo from "../../../llm-logo-provider/SessionProviderLogo";
+import {
+  CLAUDE_MODELS,
+  CURSOR_MODELS,
+  CODEX_MODELS,
+  GEMINI_MODELS,
+} from "../../../../../shared/modelConstants";
+import type { ProjectSession, LLMProvider } from "../../../../types/app";
+import { NextTaskBanner } from "../../../task-master";
+import {
+  Dialog,
+  DialogTrigger,
+  DialogContent,
+  DialogTitle,
+  Command,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  Card,
+} from "../../../../shared/view/ui";
+
+type ProviderSelectionEmptyStateProps = {
   selectedSession: ProjectSession | null;
   currentSessionId: string | null;
-  provider: SessionProvider;
-  setProvider: (next: SessionProvider) => void;
+  provider: LLMProvider;
+  setProvider: (next: LLMProvider) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
   claudeModel: string;
   setClaudeModel: (model: string) => void;
@@ -18,58 +38,52 @@ interface ProviderSelectionEmptyStateProps {
   setCursorModel: (model: string) => void;
   codexModel: string;
   setCodexModel: (model: string) => void;
+  geminiModel: string;
+  setGeminiModel: (model: string) => void;
   tasksEnabled: boolean;
   isTaskMasterInstalled: boolean | null;
   onShowAllTasks?: (() => void) | null;
   setInput: React.Dispatch<React.SetStateAction<string>>;
-}
-
-type ProviderDef = {
-  id: SessionProvider;
-  name: string;
-  infoKey: string;
-  accent: string;
-  ring: string;
-  check: string;
 };
 
-const PROVIDERS: ProviderDef[] = [
-  {
-    id: 'claude',
-    name: 'Claude Code',
-    infoKey: 'providerSelection.providerInfo.anthropic',
-    accent: 'border-primary',
-    ring: 'ring-primary/15',
-    check: 'bg-primary text-primary-foreground',
-  },
-  {
-    id: 'cursor',
-    name: 'Cursor',
-    infoKey: 'providerSelection.providerInfo.cursorEditor',
-    accent: 'border-violet-500 dark:border-violet-400',
-    ring: 'ring-violet-500/15',
-    check: 'bg-violet-500 text-white',
-  },
-  {
-    id: 'codex',
-    name: 'Codex',
-    infoKey: 'providerSelection.providerInfo.openai',
-    accent: 'border-emerald-600 dark:border-emerald-400',
-    ring: 'ring-emerald-600/15',
-    check: 'bg-emerald-600 dark:bg-emerald-500 text-white',
-  },
+type ProviderGroup = {
+  id: LLMProvider;
+  name: string;
+  models: { value: string; label: string }[];
+};
+
+const PROVIDER_GROUPS: ProviderGroup[] = [
+  { id: "claude", name: "Anthropic", models: CLAUDE_MODELS.OPTIONS },
+  { id: "cursor", name: "Cursor", models: CURSOR_MODELS.OPTIONS },
+  { id: "codex", name: "OpenAI", models: CODEX_MODELS.OPTIONS },
+  { id: "gemini", name: "Google", models: GEMINI_MODELS.OPTIONS },
 ];
 
-function getModelConfig(p: SessionProvider) {
-  if (p === 'claude') return CLAUDE_MODELS;
-  if (p === 'codex') return CODEX_MODELS;
+function getModelConfig(p: LLMProvider) {
+  if (p === "claude") return CLAUDE_MODELS;
+  if (p === "codex") return CODEX_MODELS;
+  if (p === "gemini") return GEMINI_MODELS;
   return CURSOR_MODELS;
 }
 
-function getModelValue(p: SessionProvider, c: string, cu: string, co: string) {
-  if (p === 'claude') return c;
-  if (p === 'codex') return co;
+function getCurrentModel(
+  p: LLMProvider,
+  c: string,
+  cu: string,
+  co: string,
+  g: string,
+) {
+  if (p === "claude") return c;
+  if (p === "codex") return co;
+  if (p === "gemini") return g;
   return cu;
+}
+
+function getProviderDisplayName(p: LLMProvider) {
+  if (p === "claude") return "Claude";
+  if (p === "cursor") return "Cursor";
+  if (p === "codex") return "Codex";
+  return "Gemini";
 }
 
 export default function ProviderSelectionEmptyState({
@@ -84,115 +98,196 @@ export default function ProviderSelectionEmptyState({
   setCursorModel,
   codexModel,
   setCodexModel,
+  geminiModel,
+  setGeminiModel,
   tasksEnabled,
   isTaskMasterInstalled,
   onShowAllTasks,
   setInput,
 }: ProviderSelectionEmptyStateProps) {
-  const { t } = useTranslation('chat');
-  const nextTaskPrompt = t('tasks.nextTaskPrompt', { defaultValue: 'Start the next task' });
+  const { t } = useTranslation("chat");
+  const { isWindowsServer } = useServerPlatform();
+  const [dialogOpen, setDialogOpen] = useState(false);
 
-  const selectProvider = (next: SessionProvider) => {
-    setProvider(next);
-    localStorage.setItem('selected-provider', next);
-    setTimeout(() => textareaRef.current?.focus(), 100);
-  };
+  const visibleProviderGroups = useMemo(
+    () => (isWindowsServer ? PROVIDER_GROUPS.filter((p) => p.id !== "cursor") : PROVIDER_GROUPS),
+    [isWindowsServer],
+  );
 
-  const handleModelChange = (value: string) => {
-    if (provider === 'claude') { setClaudeModel(value); localStorage.setItem('claude-model', value); }
-    else if (provider === 'codex') { setCodexModel(value); localStorage.setItem('codex-model', value); }
-    else { setCursorModel(value); localStorage.setItem('cursor-model', value); }
-  };
+  useEffect(() => {
+    if (isWindowsServer && provider === "cursor") {
+      setProvider("claude");
+      localStorage.setItem("selected-provider", "claude");
+    }
+  }, [isWindowsServer, provider, setProvider]);
 
-  const modelConfig = getModelConfig(provider);
-  const currentModel = getModelValue(provider, claudeModel, cursorModel, codexModel);
+  const nextTaskPrompt = t("tasks.nextTaskPrompt", {
+    defaultValue: "Start the next task",
+  });
 
-  /* ── New session — provider picker ── */
+  const currentModel = getCurrentModel(
+    provider,
+    claudeModel,
+    cursorModel,
+    codexModel,
+    geminiModel,
+  );
+
+  const currentModelLabel = useMemo(() => {
+    const config = getModelConfig(provider);
+    const found = config.OPTIONS.find(
+      (o: { value: string; label: string }) => o.value === currentModel,
+    );
+    return found?.label || currentModel;
+  }, [provider, currentModel]);
+
+  const setModelForProvider = useCallback(
+    (providerId: LLMProvider, modelValue: string) => {
+      if (providerId === "claude") {
+        setClaudeModel(modelValue);
+        localStorage.setItem("claude-model", modelValue);
+      } else if (providerId === "codex") {
+        setCodexModel(modelValue);
+        localStorage.setItem("codex-model", modelValue);
+      } else if (providerId === "gemini") {
+        setGeminiModel(modelValue);
+        localStorage.setItem("gemini-model", modelValue);
+      } else {
+        setCursorModel(modelValue);
+        localStorage.setItem("cursor-model", modelValue);
+      }
+    },
+    [setClaudeModel, setCursorModel, setCodexModel, setGeminiModel],
+  );
+
+  const handleModelSelect = useCallback(
+    (providerId: LLMProvider, modelValue: string) => {
+      setProvider(providerId);
+      localStorage.setItem("selected-provider", providerId);
+      setModelForProvider(providerId, modelValue);
+      setDialogOpen(false);
+      setTimeout(() => textareaRef.current?.focus(), 100);
+    },
+    [setProvider, setModelForProvider, textareaRef],
+  );
+
   if (!selectedSession && !currentSessionId) {
     return (
-      <div className="flex items-center justify-center h-full px-4">
+      <div className="flex h-full items-center justify-center px-4">
         <div className="w-full max-w-md">
-          {/* Heading */}
-          <div className="text-center mb-8">
-            <h2 className="text-lg sm:text-xl font-semibold text-foreground tracking-tight">
-              {t('providerSelection.title')}
+          <div className="mb-8 text-center">
+            <h2 className="text-lg font-semibold tracking-tight text-foreground sm:text-xl">
+              {t("providerSelection.title")}
             </h2>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              {t('providerSelection.description')}
+            <p className="mt-1 text-[13px] text-muted-foreground">
+              {t("providerSelection.description")}
             </p>
           </div>
 
-          {/* Provider cards — horizontal row, equal width */}
-          <div className="grid grid-cols-3 gap-2 sm:gap-2.5 mb-6">
-            {PROVIDERS.map((p) => {
-              const active = provider === p.id;
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => selectProvider(p.id)}
-                  className={`
-                    relative flex flex-col items-center gap-2.5 pt-5 pb-4 px-2
-                    rounded-xl border-[1.5px] transition-all duration-150
-                    active:scale-[0.97]
-                    ${active
-                      ? `${p.accent} ${p.ring} ring-2 bg-card shadow-sm`
-                      : 'border-border bg-card/60 hover:bg-card hover:border-border/80'
-                    }
-                  `}
-                >
+          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            <DialogTrigger asChild>
+              <Card
+                className="group mx-auto max-w-xs cursor-pointer border-border/60 transition-all duration-150 hover:border-border hover:shadow-md active:scale-[0.99]"
+                role="button"
+                tabIndex={0}
+              >
+                <div className="flex items-center gap-2 p-3">
                   <SessionProviderLogo
-                    provider={p.id}
-                    className={`w-9 h-9 transition-transform duration-150 ${active ? 'scale-110' : ''}`}
+                    provider={provider}
+                    className="h-5 w-5 shrink-0"
                   />
-                  <div className="text-center">
-                    <p className="text-[13px] font-semibold text-foreground leading-none">{p.name}</p>
-                    <p className="text-[10px] text-muted-foreground mt-1 leading-tight">{t(p.infoKey)}</p>
-                  </div>
-                  {/* Check badge */}
-                  {active && (
-                    <div className={`absolute -top-1 -right-1 w-[18px] h-[18px] rounded-full ${p.check} flex items-center justify-center shadow-sm`}>
-                      <Check className="w-2.5 h-2.5" strokeWidth={3} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-semibold text-foreground">
+                        {getProviderDisplayName(provider)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">·</span>
+                      <span className="truncate text-xs text-foreground">
+                        {currentModelLabel}
+                      </span>
                     </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {t("providerSelection.clickToChange", {
+                        defaultValue: "Click to change model",
+                      })}
+                    </p>
+                  </div>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-hover:translate-y-0.5" />
+                </div>
+              </Card>
+            </DialogTrigger>
 
-          {/* Model picker — appears after provider is chosen */}
-          <div className={`transition-all duration-200 ${provider ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-1 pointer-events-none'}`}>
-            <div className="flex items-center justify-center gap-2 mb-5">
-              <span className="text-sm text-muted-foreground">{t('providerSelection.selectModel')}</span>
-              <div className="relative">
-                <select
-                  value={currentModel}
-                  onChange={(e) => handleModelChange(e.target.value)}
-                  tabIndex={-1}
-                  className="appearance-none pl-3 pr-7 py-1.5 text-sm font-medium bg-muted/50 border border-border/60 rounded-lg text-foreground cursor-pointer hover:bg-muted transition-colors focus:outline-none focus:ring-2 focus:ring-primary/20"
-                >
-                  {modelConfig.OPTIONS.map(({ value, label }: { value: string; label: string }) => (
-                    <option key={value} value={value}>{label}</option>
+            <DialogContent className="max-w-md overflow-hidden p-0">
+              <DialogTitle>Model Selector</DialogTitle>
+              <Command>
+                <CommandInput
+                  placeholder={t("providerSelection.searchModels", {
+                    defaultValue: "Search models...",
+                  })}
+                />
+                <CommandList className="max-h-[350px]">
+                  <CommandEmpty>
+                    {t("providerSelection.noModelsFound", {
+                      defaultValue: "No models found.",
+                    })}
+                  </CommandEmpty>
+                  {visibleProviderGroups.map((group) => (
+                    <CommandGroup
+                      key={group.id}
+                      heading={
+                        <span className="flex items-center gap-1.5">
+                          <SessionProviderLogo provider={group.id} className="h-3.5 w-3.5 shrink-0" />
+                          {group.name}
+                        </span>
+                      }
+                    >
+                      {group.models.map((model) => {
+                        const isSelected = provider === group.id && currentModel === model.value;
+                        return (
+                          <CommandItem
+                            key={`${group.id}-${model.value}`}
+                            value={`${group.name} ${model.label}`}
+                            onSelect={() => handleModelSelect(group.id, model.value)}
+                          >
+                            <span className="flex-1 truncate">{model.label}</span>
+                            {isSelected && (
+                              <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />
+                            )}
+                          </CommandItem>
+                        );
+                      })}
+                    </CommandGroup>
                   ))}
-                </select>
-                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground pointer-events-none" />
-              </div>
-            </div>
+                </CommandList>
+              </Command>
+            </DialogContent>
+          </Dialog>
 
-            <p className="text-center text-sm text-muted-foreground/70">
-              {provider === 'claude'
-                ? t('providerSelection.readyPrompt.claude', { model: claudeModel })
-                : provider === 'cursor'
-                  ? t('providerSelection.readyPrompt.cursor', { model: cursorModel })
-                  : provider === 'codex'
-                    ? t('providerSelection.readyPrompt.codex', { model: codexModel })
-                    : t('providerSelection.readyPrompt.default')}
-            </p>
-          </div>
+          <p className="mt-4 text-center text-sm text-muted-foreground/70">
+            {
+              {
+                claude: t("providerSelection.readyPrompt.claude", {
+                  model: claudeModel,
+                }),
+                cursor: t("providerSelection.readyPrompt.cursor", {
+                  model: cursorModel,
+                }),
+                codex: t("providerSelection.readyPrompt.codex", {
+                  model: codexModel,
+                }),
+                gemini: t("providerSelection.readyPrompt.gemini", {
+                  model: geminiModel,
+                }),
+              }[provider]
+            }
+          </p>
 
-          {/* Task banner */}
           {provider && tasksEnabled && isTaskMasterInstalled && (
             <div className="mt-5">
-              <NextTaskBanner onStartTask={() => setInput(nextTaskPrompt)} onShowAllTasks={onShowAllTasks} />
+              <NextTaskBanner
+                onStartTask={() => setInput(nextTaskPrompt)}
+                onShowAllTasks={onShowAllTasks}
+              />
             </div>
           )}
         </div>
@@ -200,17 +295,23 @@ export default function ProviderSelectionEmptyState({
     );
   }
 
-  /* ── Existing session — continue prompt ── */
   if (selectedSession) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center px-6 max-w-md">
-          <p className="text-lg font-semibold text-foreground mb-1.5">{t('session.continue.title')}</p>
-          <p className="text-sm text-muted-foreground leading-relaxed">{t('session.continue.description')}</p>
+      <div className="flex h-full items-center justify-center">
+        <div className="max-w-md px-6 text-center">
+          <p className="mb-1.5 text-lg font-semibold text-foreground">
+            {t("session.continue.title")}
+          </p>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            {t("session.continue.description")}
+          </p>
 
           {tasksEnabled && isTaskMasterInstalled && (
             <div className="mt-5">
-              <NextTaskBanner onStartTask={() => setInput(nextTaskPrompt)} onShowAllTasks={onShowAllTasks} />
+              <NextTaskBanner
+                onStartTask={() => setInput(nextTaskPrompt)}
+                onShowAllTasks={onShowAllTasks}
+              />
             </div>
           )}
         </div>
